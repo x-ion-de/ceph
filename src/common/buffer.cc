@@ -956,7 +956,12 @@ void buffer::list::rebuild_page_aligned()
       append("\n", 1);
     }
   }
-  
+
+  void buffer::list::append(std::stringstream& ss)
+  {
+    append(ss.str());
+  }
+
   void buffer::list::append_zero(unsigned len)
   {
     ptr bp(len);
