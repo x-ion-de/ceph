@@ -6247,6 +6247,9 @@ void ReplicatedPG::on_removal()
   dout(10) << "on_removal" << dendl;
   apply_and_flush_repops(false);
   remove_watchers_and_notifies();
+
+  clear_scrub_reserved();
+  scrub_clear_state();
 }
 
 void ReplicatedPG::on_shutdown()
