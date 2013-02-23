@@ -3510,6 +3510,7 @@ void PG::classic_scrub()
   if (!scrubber.active) {
     dout(10) << "scrub start" << dendl;
     scrubber.active = true;
+    scrubber.classic = true;
 
     update_stats();
     scrubber.received_maps.clear();
