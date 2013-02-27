@@ -111,3 +111,6 @@ Makefile
 /test_librbd_fsx
 /scratchtool
 /scratchtoolpp
+
+# old dir, may in use by older branches
+/leveldb
