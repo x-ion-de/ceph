@@ -215,6 +215,17 @@ def main():
             ),
         )
 
+    bootstrap_key(
+        cluster=args.cluster,
+        type_='rgw',
+        caps=dict(
+            mon=[
+                r'allow command auth get-or-create * osd allow\ rwx mon allow\ r',
+                'allow command mon getmap',
+                ],
+            ),
+        )
+
 
 if __name__ == '__main__':
     main()
