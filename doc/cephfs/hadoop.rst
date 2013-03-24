@@ -57,7 +57,7 @@ These options are intended to be set in the Hadoop configuration file
 |Property             |Value                     |Notes                       |
 |                     |                          |                            |
 +=====================+==========================+============================+
-|fs.default.name      |Ceph URI                  |ceph://[monaddr:port][/root]|
+|fs.default.name      |Ceph URI                  |ceph://[monaddr:port]/      |
 |                     |                          |                            |
 |                     |                          |                            |
 +---------------------+--------------------------+----------------------------+
