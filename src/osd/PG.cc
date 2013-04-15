@@ -62,7 +62,7 @@ void PGPool::update(OSDMapRef map)
 PG::PG(OSDService *o, OSDMapRef curmap,
        const PGPool &_pool, pg_t p, const hobject_t& loid,
        const hobject_t& ioid) :
-  osd(o), osdmap_ref(curmap), pool(_pool),
+  osd(o), osdmap_ref(curmap), last_persisted_osdmap_ref(curmap), pool(_pool),
   _lock("PG::_lock"),
   ref(0), deleting(false), dirty_info(false), dirty_log(false),
   info(p), coll(p), log_oid(loid), biginfo_oid(ioid),
@@ -2329,6 +2329,7 @@ void PG::init(int role, vector<int>& newup, vector<int>& newacting, pg_history_t
 
 void PG::write_info(ObjectStore::Transaction& t)
 {
+  last_persisted_osdmap_ref = osdmap_ref;
   // pg state
   bufferlist infobl;
   __u8 struct_v = 5;
@@ -5200,7 +5201,9 @@ void PG::handle_activate_map(RecoveryCtx *rctx)
   dout(10) << "handle_activate_map " << dendl;
   ActMap evt;
   recovery_state.handle_event(evt, rctx);
-  dirty_info = true;
+  if (osdmap_ref->get_epoch() - last_persisted_osdmap_ref->get_epoch() >
+      g_conf->osd_pg_epoch_persisted_max_stale)
+    dirty_info = true;
 }
 
 void PG::handle_loaded(RecoveryCtx *rctx)
