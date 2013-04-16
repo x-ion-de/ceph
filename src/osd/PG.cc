@@ -5202,8 +5202,16 @@ void PG::handle_activate_map(RecoveryCtx *rctx)
   ActMap evt;
   recovery_state.handle_event(evt, rctx);
   if (osdmap_ref->get_epoch() - last_persisted_osdmap_ref->get_epoch() >
-      g_conf->osd_pg_epoch_persisted_max_stale)
+      g_conf->osd_pg_epoch_persisted_max_stale) {
+    dout(20) << __func__ << ": Dirtying info: last_persisted is "
+	     << last_persisted_osdmap_ref->get_epoch()
+	     << " while current is " << osdmap_ref->get_epoch() << dendl;
     dirty_info = true;
+  } else {
+    dout(20) << __func__ << ": Not dirtying info: last_persisted is "
+	     << last_persisted_osdmap_ref->get_epoch()
+	     << " while current is " << osdmap_ref->get_epoch() << dendl;
+  }
 }
 
 void PG::handle_loaded(RecoveryCtx *rctx)
