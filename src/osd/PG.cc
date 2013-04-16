@@ -48,6 +48,7 @@ void PGPool::update(OSDMapRef map)
   assert(pi);
   info = *pi;
   auid = pi->auid;
+  name = map->get_pool_name(id);
   if (pi->get_snap_epoch() == map->get_epoch()) {
     pi->build_removed_snaps(newly_removed_snaps);
     newly_removed_snaps.subtract(cached_removed_snaps);
@@ -268,8 +269,23 @@ void PG::proc_replica_log(ObjectStore::Transaction& t,
   if (lu < oinfo.last_update) {
     dout(10) << " peer osd." << from << " last_update now " << lu << dendl;
     oinfo.last_update = lu;
-    if (lu < oinfo.last_complete)
-      oinfo.last_complete = lu;
+  }
+
+  if (omissing.have_missing()) {
+    eversion_t first_missing =
+      omissing.missing[omissing.rmissing.begin()->second].need;
+    oinfo.last_complete = eversion_t();
+    list<pg_log_entry_t>::const_iterator i = olog.log.begin();
+    for (;
+	 i != olog.log.end();
+	 ++i) {
+      if (i->version < first_missing)
+	oinfo.last_complete = i->version;
+      else
+	break;
+    }
+  } else {
+    oinfo.last_complete = oinfo.last_update;
   }
 
   peer_info[from] = oinfo;
@@ -2912,9 +2928,6 @@ void PG::update_snap_collections(vector<pg_log_entry_t> &log_entries,
   for (vector<pg_log_entry_t>::iterator i = log_entries.begin();
        i != log_entries.end();
        ++i) {
-    // If past backfill line, snap_collections will be updated during push
-    if (i->soid > info.last_backfill)
-      continue;
     if (i->snaps.length() > 0) {
       vector<snapid_t> snaps;
       bufferlist::iterator p = i->snaps.begin();
@@ -3156,8 +3169,8 @@ void PG::_scan_list(ScrubMap &map, vector<hobject_t> &ls, bool deep)
 
       // calculate the CRC32 on deep scrubs
       if (deep) {
-        bufferhash h;
-        bufferlist bl;
+        bufferhash h, oh;
+        bufferlist bl, hdrbl;
         int r;
         __u64 pos = 0;
         while ( (r = osd->store->read(coll, poid, pos,
@@ -3168,6 +3181,33 @@ void PG::_scan_list(ScrubMap &map, vector<hobject_t> &ls, bool deep)
         }
         o.digest = h.digest();
         o.digest_present = true;
+
+        bl.clear();
+        r = osd->store->omap_get_header(coll, poid, &hdrbl);
+        if (r == 0) {
+          dout(25) << "CRC header " << string(hdrbl.c_str(), hdrbl.length())
+             << dendl;
+          ::encode(hdrbl, bl);
+          oh << bl;
+          bl.clear();
+        }
+
+        ObjectMap::ObjectMapIterator iter = osd->store->get_omap_iterator(
+          coll, poid);
+        assert(iter);
+        for (iter->seek_to_first(); iter->valid() ; iter->next()) {
+          dout(25) << "CRC key " << iter->key() << " value "
+            << string(iter->value().c_str(), iter->value().length()) << dendl;
+
+          ::encode(iter->key(), bl);
+          ::encode(iter->value(), bl);
+          oh << bl;
+          bl.clear();
+        }
+
+        //Store final calculated CRC32 of omap header & key/values
+        o.omap_digest = oh.digest();
+        o.omap_digest_present = true;
       }
 
       if (poid.snap != CEPH_SNAPDIR && poid.snap != CEPH_NOSNAP) {
@@ -3654,6 +3694,7 @@ void PG::classic_scrub()
   if (!scrubber.active) {
     dout(10) << "scrub start" << dendl;
     scrubber.active = true;
+    scrubber.classic = true;
 
     update_stats();
     scrubber.received_maps.clear();
@@ -4068,6 +4109,16 @@ bool PG::_compare_scrub_objects(ScrubMap::object &auth,
 
       errorstream << "digest " << candidate.digest
                   << " != known digest " << auth.digest;
+    }
+  }
+  if (auth.omap_digest_present && candidate.omap_digest_present) {
+    if (auth.omap_digest != candidate.omap_digest) {
+      if (!ok)
+        errorstream << ", ";
+      ok = false;
+
+      errorstream << "omap_digest " << candidate.omap_digest
+                  << " != known omap_digest " << auth.omap_digest;
     }
   }
   for (map<string,bufferptr>::const_iterator i = auth.attrs.begin();
@@ -4695,13 +4746,20 @@ void PG::start_peering_interval(const OSDMapRef lastmap,
     dout(10) << " no lastmap" << dendl;
     dirty_info = true;
   } else {
+    std::stringstream debug;
     bool new_interval = pg_interval_t::check_new_interval(
       oldacting, newacting,
       oldup, newup,
       info.history.same_interval_since,
       info.history.last_epoch_clean,
       osdmap,
-      lastmap, info.pgid.pool(), info.pgid, &past_intervals);
+      lastmap,
+      info.pgid.pool(),
+      info.pgid,
+      &past_intervals,
+      &debug);
+    dout(10) << __func__ << ": check_new_interval output: "
+	     << debug.str() << dendl;
     if (new_interval) {
       dout(10) << " noting past " << past_intervals.rbegin()->second << dendl;
       dirty_info = true;
@@ -5010,23 +5068,23 @@ bool PG::must_delay_request(OpRequestRef op)
 {
   switch (op->request->get_type()) {
   case CEPH_MSG_OSD_OP:
-    return !require_same_or_newer_map(
+    return !have_same_or_newer_map(
       static_cast<MOSDOp*>(op->request)->get_map_epoch());
 
   case MSG_OSD_SUBOP:
-    return !require_same_or_newer_map(
+    return !have_same_or_newer_map(
       static_cast<MOSDSubOp*>(op->request)->map_epoch);
 
   case MSG_OSD_SUBOPREPLY:
-    return !require_same_or_newer_map(
+    return !have_same_or_newer_map(
       static_cast<MOSDSubOpReply*>(op->request)->map_epoch);
 
   case MSG_OSD_PG_SCAN:
-    return !require_same_or_newer_map(
+    return !have_same_or_newer_map(
       static_cast<MOSDPGScan*>(op->request)->map_epoch);
 
   case MSG_OSD_PG_BACKFILL:
-    return !require_same_or_newer_map(
+    return !have_same_or_newer_map(
       static_cast<MOSDPGBackfill*>(op->request)->map_epoch);
   }
   assert(0);
@@ -5047,7 +5105,7 @@ void PG::take_waiters()
 void PG::handle_peering_event(CephPeeringEvtRef evt, RecoveryCtx *rctx)
 {
   dout(10) << "handle_peering_event: " << evt->get_desc() << dendl;
-  if (!require_same_or_newer_map(evt->get_epoch_sent())) {
+  if (!have_same_or_newer_map(evt->get_epoch_sent())) {
     dout(10) << "deferring event " << evt->get_desc() << dendl;
     peering_waiters.push_back(evt);
     return;
@@ -5390,6 +5448,14 @@ PG::RecoveryState::Primary::Primary(my_context ctx)
 {
   state_name = "Started/Primary";
   context< RecoveryMachine >().log_enter(state_name);
+}
+
+boost::statechart::result PG::RecoveryState::Primary::react(const AdvMap &advmap)
+{
+  PG *pg = context< RecoveryMachine >().pg;
+  pg->remove_down_peer_info(advmap.osdmap);
+  pg->check_recovery_sources(advmap.osdmap);
+  return forward_event();
 }
 
 boost::statechart::result PG::RecoveryState::Primary::react(const MNotifyRec& notevt)
@@ -5981,7 +6047,6 @@ boost::statechart::result PG::RecoveryState::Active::react(const AdvMap& advmap)
     dout(10) << *pg << " snap_trimq now " << pg->snap_trimq << dendl;
     pg->dirty_info = true;
   }
-  pg->check_recovery_sources(pg->get_osdmap());
 
   for (vector<int>::iterator p = pg->want_acting.begin();
        p != pg->want_acting.end(); ++p) {
@@ -6234,9 +6299,10 @@ boost::statechart::result PG::RecoveryState::ReplicaActive::react(const ActMap&)
 boost::statechart::result PG::RecoveryState::ReplicaActive::react(const MQuery& query)
 {
   PG *pg = context< RecoveryMachine >().pg;
-  assert(query.query.type == pg_query_t::MISSING);
-  pg->update_history_from_master(query.query.history);
-  pg->fulfill_log(query.from, query.query, query.query_epoch);
+  if (query.query.type == pg_query_t::MISSING) {
+    pg->update_history_from_master(query.query.history);
+    pg->fulfill_log(query.from, query.query, query.query_epoch);
+  } // else: from prior to activation, safe to ignore
   return discard_event();
 }
 
@@ -6646,8 +6712,6 @@ boost::statechart::result PG::RecoveryState::WaitActingChange::react(const AdvMa
   PG *pg = context< RecoveryMachine >().pg;
   OSDMapRef osdmap = advmap.osdmap;
 
-  pg->remove_down_peer_info(osdmap);
-
   dout(10) << "verifying no want_acting " << pg->want_acting << " targets didn't go down" << dendl;
   for (vector<int>::iterator p = pg->want_acting.begin(); p != pg->want_acting.end(); ++p) {
     if (!osdmap->is_up(*p)) {
@@ -6808,7 +6872,14 @@ boost::statechart::result PG::RecoveryState::GetMissing::react(const MLogRec& lo
 		       logevt.msg->info, logevt.msg->log, logevt.msg->missing, logevt.from);
   
   if (peer_missing_requested.empty()) {
-    post_event(CheckRepops());
+    if (pg->need_up_thru) {
+      dout(10) << " still need up_thru update before going active" << dendl;
+      post_event(NeedUpThru());
+    } else {
+      dout(10) << "Got last missing, don't need missing "
+	       << "posting CheckRepops" << dendl;
+      post_event(CheckRepops());
+    }
   }
   return discard_event();
 };

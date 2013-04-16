@@ -202,8 +202,12 @@ void OSDService::expand_pg_num(OSDMapRef old_map,
     if (!new_map->have_pg_pool(i->pool())) {
       in_progress_splits.erase(i++);
     } else {
-      i->is_split(old_map->get_pg_num(i->pool()),
-		  new_map->get_pg_num(i->pool()), &children);
+      if (i->ps() < static_cast<unsigned>(old_map->get_pg_num(i->pool()))) {
+	i->is_split(old_map->get_pg_num(i->pool()),
+		    new_map->get_pg_num(i->pool()), &children);
+      } else {
+	assert(i->ps() < static_cast<unsigned>(new_map->get_pg_num(i->pool())));
+      }
       ++i;
     }
   }
@@ -1224,8 +1228,6 @@ int OSD::shutdown()
   hbserver_messenger->shutdown();
 
   monc->shutdown();
-
-  osd_lock.Unlock();
   return r;
 }
 
@@ -1481,39 +1483,58 @@ void OSD::load_pgs()
     derr << "failed to list pgs: " << cpp_strerror(-r) << dendl;
   }
 
+  set<pg_t> head_pgs;
+  map<pg_t, interval_set<snapid_t> > pgs;
   for (vector<coll_t>::iterator it = ls.begin();
        it != ls.end();
        it++) {
     pg_t pgid;
     snapid_t snap;
-    if (!it->is_pg(pgid, snap)) {
-      if (it->is_temp(pgid))
-	clear_temp(store, *it);
-      dout(10) << "load_pgs skipping non-pg " << *it << dendl;
-      if (it->is_temp(pgid)) {
-	clear_temp(store, *it);
-	continue;
-      }
-      uint64_t seq;
-      if (it->is_removal(&seq, &pgid)) {
-	if (seq >= next_removal_seq)
-	  next_removal_seq = seq + 1;
-	dout(10) << "queueing coll " << *it << " for removal, seq is "
-		 << seq << "pgid is " << pgid << dendl;
-	boost::tuple<coll_t, SequencerRef, DeletingStateRef> *to_queue =
-	  new boost::tuple<coll_t, SequencerRef, DeletingStateRef>;
-	to_queue->get<0>() = *it;
-	to_queue->get<1>() = service.osr_registry.lookup_or_create(
-	  pgid, stringify(pgid));
-	to_queue->get<2>() = service.deleting_pgs.lookup_or_create(pgid);
-	remove_wq.queue(to_queue);
-	continue;
+
+    if (it->is_temp(pgid)) {
+      dout(10) << "load_pgs " << *it << " clearing temp" << dendl;
+      clear_temp(store, *it);
+      continue;
+    }
+
+    if (it->is_pg(pgid, snap)) {
+      if (snap != CEPH_NOSNAP) {
+	dout(10) << "load_pgs skipping snapped dir " << *it
+		 << " (pg " << pgid << " snap " << snap << ")" << dendl;
+	pgs[pgid].insert(snap);
+      } else {
+	pgs[pgid];
+	head_pgs.insert(pgid);
       }
       continue;
     }
-    if (snap != CEPH_NOSNAP) {
-      dout(10) << "load_pgs skipping snapped dir " << *it
-	       << " (pg " << pgid << " snap " << snap << ")" << dendl;
+
+    uint64_t seq;
+    if (it->is_removal(&seq, &pgid)) {
+      if (seq >= next_removal_seq)
+	next_removal_seq = seq + 1;
+      dout(10) << "load_pgs queueing " << *it << " for removal, seq is "
+	       << seq << " pgid is " << pgid << dendl;
+      boost::tuple<coll_t, SequencerRef, DeletingStateRef> *to_queue =
+	new boost::tuple<coll_t, SequencerRef, DeletingStateRef>;
+      to_queue->get<0>() = *it;
+      to_queue->get<1>() = service.osr_registry.lookup_or_create(pgid, stringify(pgid));
+      to_queue->get<2>() = service.deleting_pgs.lookup_or_create(pgid);
+      remove_wq.queue(to_queue);
+      continue;
+    }
+
+    dout(10) << "load_pgs ignoring unrecognized " << *it << dendl;
+  }
+
+  for (map<pg_t, interval_set<snapid_t> >::iterator i = pgs.begin();
+       i != pgs.end();
+       ++i) {
+    pg_t pgid(i->first);
+
+    if (!head_pgs.count(pgid)) {
+      dout(10) << __func__ << ": " << pgid << " has orphan snap collections " << i->second
+	       << " with no head" << dendl;
       continue;
     }
 
@@ -1529,8 +1550,9 @@ void OSD::load_pgs()
       continue;
     }
 
+    dout(10) << "pgid " << pgid << " coll " << coll_t(pgid) << dendl;
     bufferlist bl;
-    epoch_t map_epoch = PG::peek_map_epoch(store, *it, &bl);
+    epoch_t map_epoch = PG::peek_map_epoch(store, coll_t(pgid), &bl);
 
     PG *pg = _open_lock_pg(map_epoch == 0 ? osdmap : service.get_map(map_epoch), pgid);
 
@@ -3456,7 +3478,8 @@ void OSD::_dispatch(Message *m)
     session = (Session *)m->get_connection()->get_priv();
     if (!session ||
 	session->entity_name.is_mon() ||
-	session->entity_name.is_osd()) shutdown();
+	session->entity_name.is_osd())
+      shutdown();
     else dout(0) << "shutdown message from connection with insufficient privs!"
 		 << m->get_connection() << dendl;
     m->put();
@@ -4105,8 +4128,7 @@ void OSD::advance_pg(
     lastmap = nextmap;
     handle.reset_tp_timeout();
   }
-  if (!is_booting())
-    pg->handle_activate_map(rctx);
+  pg->handle_activate_map(rctx);
 }
 
 /** 
@@ -4208,9 +4230,6 @@ void OSD::consume_map()
 
   list<PG*> to_remove;
 
-  service.expand_pg_num(service.get_osdmap(),
-			osdmap);
-
   // scan pg's
   for (hash_map<pg_t,PG*>::iterator it = pg_map.begin();
        it != pg_map.end();
@@ -4251,6 +4270,8 @@ void OSD::consume_map()
     (*i)->put();
   }
   to_remove.clear();
+
+  service.expand_pg_num(service.get_osdmap(), osdmap);
 
   service.pre_publish_map(osdmap);
   service.publish_map(osdmap);
@@ -4485,6 +4506,8 @@ bool OSD::require_same_or_newer_map(OpRequestRef op, epoch_t epoch)
   Message *m = op->request;
   dout(15) << "require_same_or_newer_map " << epoch << " (i am " << osdmap->get_epoch() << ") " << m << dendl;
 
+  assert(osd_lock.is_locked());
+
   // do they have a newer map?
   if (epoch > osdmap->get_epoch()) {
     dout(7) << "waiting for newer map epoch " << epoch << " > my " << osdmap->get_epoch() << " with " << m << dendl;
@@ -4502,12 +4525,8 @@ bool OSD::require_same_or_newer_map(OpRequestRef op, epoch_t epoch)
     int from = m->get_source().num();
     if (!osdmap->have_inst(from) ||
 	osdmap->get_cluster_addr(from) != m->get_source_inst().addr) {
-      if (m->get_connection()->has_feature(CEPH_FEATURE_OSD_HBMSGS)) {
-	dout(10) << "from dead osd." << from << ", dropping, sharing map" << dendl;
-	send_incremental_map(epoch, m->get_connection());
-      } else {
-	dout(10) << "from dead osd." << from << ", but it lacks OSD_HBMSGS feature, not sharing map" << dendl;
-      }
+      dout(10) << "from dead osd." << from << ", marking down" << dendl;
+      cluster_messenger->mark_down(m->get_connection());
       return false;
     }
   }
@@ -4568,16 +4587,29 @@ void OSD::split_pgs(
     dout(10) << "m_seed " << i->ps() << dendl;
     dout(10) << "split_bits is " << split_bits << dendl;
 
+    rctx->transaction->create_collection(
+      coll_t(*i));
     rctx->transaction->split_collection(
       coll_t(parent->info.pgid),
       split_bits,
       i->m_seed,
       coll_t(*i));
+    if (parent->have_temp_coll()) {
+      rctx->transaction->create_collection(
+	coll_t::make_temp_coll(*i));
+      rctx->transaction->split_collection(
+	coll_t::make_temp_coll(parent->info.pgid),
+	split_bits,
+	i->m_seed,
+	coll_t::make_temp_coll(*i));
+    }
     for (interval_set<snapid_t>::iterator k = parent->snap_collections.begin();
 	 k != parent->snap_collections.end();
 	 ++k) {
       for (snapid_t j = k.get_start(); j < k.get_start() + k.get_len();
 	   ++j) {
+	rctx->transaction->create_collection(
+	  coll_t(*i, j));
 	rctx->transaction->split_collection(
 	  coll_t(parent->info.pgid, j),
 	  split_bits,
@@ -4931,11 +4963,13 @@ bool OSD::compat_must_dispatch_immediately(PG *pg)
 
 void OSD::dispatch_context(PG::RecoveryCtx &ctx, PG *pg, OSDMapRef curmap)
 {
-  do_notifies(*ctx.notify_list, curmap);
+  if (service.get_osdmap()->is_up(whoami)) {
+    do_notifies(*ctx.notify_list, curmap);
+    do_queries(*ctx.query_map, curmap);
+    do_infos(*ctx.info_map, curmap);
+  }
   delete ctx.notify_list;
-  do_queries(*ctx.query_map, curmap);
   delete ctx.query_map;
-  do_infos(*ctx.info_map, curmap);
   delete ctx.info_map;
   if ((ctx.on_applied->empty() &&
        ctx.on_safe->empty() &&
@@ -6284,6 +6318,13 @@ int OSD::init_op_flags(MOSDOp *op)
 	  return r;
 	}
 	int flags = cls->get_method_flags(mname.c_str());
+	if (flags < 0) {
+	  if (flags == -ENOENT)
+	    r = -EOPNOTSUPP;
+	  else
+	    r = flags;
+	  return r;
+	}
 	is_read = flags & CLS_METHOD_RD;
 	is_write = flags & CLS_METHOD_WR;
 
@@ -6299,6 +6340,9 @@ int OSD::init_op_flags(MOSDOp *op)
       break;
     }
   }
+
+  if (op->rmw_flags == 0)
+    return -EINVAL;
 
   return 0;
 }

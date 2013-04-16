@@ -815,6 +815,7 @@ public:
       block_writes(false), active(false), queue_snap_trim(false),
       waiting_on(0), errors(0), fixed(0), active_rep_scrub(0),
       must_scrub(false), must_deep_scrub(false), must_repair(false),
+      classic(false),
       finalizing(false), is_chunky(false), state(INACTIVE),
       deep(false)
     {
@@ -850,6 +851,7 @@ public:
     map<hobject_t, pair<ScrubMap::object, int> > authoritative;
 
     // classic scrub
+    bool classic;
     bool finalizing;
 
     // chunky scrub
@@ -921,6 +923,7 @@ public:
 
     // clear all state
     void reset() {
+      classic = false;
       finalizing = false;
       block_writes = false;
       active = false;
@@ -1339,8 +1342,10 @@ public:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< ActMap >,
 	boost::statechart::custom_reaction< MNotifyRec >,
-	boost::statechart::transition< NeedActingChange, WaitActingChange >
+	boost::statechart::transition< NeedActingChange, WaitActingChange >,
+	boost::statechart::custom_reaction< AdvMap>
 	> reactions;
+      boost::statechart::result react(const AdvMap&);
       boost::statechart::result react(const ActMap&);
       boost::statechart::result react(const MNotifyRec&);
     };
@@ -1830,7 +1835,7 @@ public:
   bool old_peering_evt(CephPeeringEvtRef evt) {
     return old_peering_msg(evt->get_epoch_sent(), evt->get_epoch_requested());
   }
-  bool require_same_or_newer_map(epoch_t e) {
+  bool have_same_or_newer_map(epoch_t e) {
     return e <= get_osdmap()->get_epoch();
   }
 

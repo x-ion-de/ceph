@@ -563,30 +563,45 @@ void ReplicatedPG::do_pg_op(OpRequestRef op)
 
 void ReplicatedPG::calc_trim_to()
 {
-  if (!is_degraded() && !is_scrubbing() && is_clean()) {
-    if (min_last_complete_ondisk != eversion_t() &&
-	min_last_complete_ondisk != pg_trim_to &&
-	log.approx_size() > g_conf->osd_min_pg_log_entries) {
-      size_t num_to_trim = log.approx_size() - g_conf->osd_min_pg_log_entries;
-      list<pg_log_entry_t>::const_iterator it = log.log.begin();
-      eversion_t new_trim_to;
-      for (size_t i = 0; i < num_to_trim; ++i) {
-	new_trim_to = it->version;
-	++it;
-	if (new_trim_to > min_last_complete_ondisk) {
-	  new_trim_to = min_last_complete_ondisk;
-	  dout(10) << "calc_trim_to trimming to min_last_complete_ondisk" << dendl;
-	  break;
-	}
-      }
-      dout(10) << "calc_trim_to " << pg_trim_to << " -> " << new_trim_to << dendl;
-      pg_trim_to = new_trim_to;
-      assert(pg_trim_to <= log.head);
-      assert(pg_trim_to <= min_last_complete_ondisk);
-    }
-  } else {
-    // don't trim
+  if (state_test(PG_STATE_RECOVERING |
+		 PG_STATE_RECOVERY_WAIT |
+		 PG_STATE_BACKFILL |
+		 PG_STATE_BACKFILL_WAIT |
+		 PG_STATE_BACKFILL_TOOFULL)) {
+    dout(10) << "calc_trim_to no trim during recovery" << dendl;
     pg_trim_to = eversion_t();
+    return;
+  }
+
+  if (is_scrubbing() && scrubber.classic) {
+    dout(10) << "calc_trim_to no trim during classic scrub" << dendl;
+    pg_trim_to = eversion_t();
+    return;
+  }
+
+  size_t target = g_conf->osd_min_pg_log_entries;
+  if (is_degraded())
+    target = g_conf->osd_max_pg_log_entries;
+
+  if (min_last_complete_ondisk != eversion_t() &&
+      min_last_complete_ondisk != pg_trim_to &&
+      log.approx_size() > target) {
+    size_t num_to_trim = log.approx_size() - target;
+    list<pg_log_entry_t>::const_iterator it = log.log.begin();
+    eversion_t new_trim_to;
+    for (size_t i = 0; i < num_to_trim; ++i) {
+      new_trim_to = it->version;
+      ++it;
+      if (new_trim_to > min_last_complete_ondisk) {
+	new_trim_to = min_last_complete_ondisk;
+	dout(10) << "calc_trim_to trimming to min_last_complete_ondisk" << dendl;
+	break;
+      }
+    }
+    dout(10) << "calc_trim_to " << pg_trim_to << " -> " << new_trim_to << dendl;
+    pg_trim_to = new_trim_to;
+    assert(pg_trim_to <= log.head);
+    assert(pg_trim_to <= min_last_complete_ondisk);
   }
 }
 
@@ -1081,7 +1096,7 @@ void ReplicatedPG::log_subop_stats(OpRequestRef op, int tag_inb, int tag_lat)
 void ReplicatedPG::do_sub_op(OpRequestRef op)
 {
   MOSDSubOp *m = (MOSDSubOp*)op->request;
-  assert(require_same_or_newer_map(m->map_epoch));
+  assert(have_same_or_newer_map(m->map_epoch));
   assert(m->get_header().type == MSG_OSD_SUBOP);
   dout(15) << "do_sub_op " << *op->request << dendl;
 
@@ -1241,7 +1256,11 @@ void ReplicatedPG::do_backfill(OpRequestRef op)
       assert(g_conf->osd_kill_backfill_at != 2);
 
       info.last_backfill = m->last_backfill;
-      info.stats.stats = m->stats;
+      if (m->compat_stat_sum) {
+	info.stats.stats = m->stats.stats; // Previously, we only sent sum
+      } else {
+	info.stats = m->stats;
+      }
 
       ObjectStore::Transaction *t = new ObjectStore::Transaction;
       write_info(*t);
@@ -1423,7 +1442,7 @@ ReplicatedPG::RepGather *ReplicatedPG::trim_object(const hobject_t &coid,
 
     dout(10) << "removing coid " << coid << " from snap collections "
 	     << to_remove << " and adding to snap collections "
-	     << to_create << dendl;
+	     << to_create << " for final snaps " << coi.snaps << dendl;
 
     ctx->log.push_back(pg_log_entry_t(pg_log_entry_t::MODIFY, coid, coi.version, coi.prior_version,
 				  osd_reqid_t(), ctx->mtime));
@@ -4646,7 +4665,13 @@ void ReplicatedPG::sub_op_modify(OpRequestRef op)
       }
       
       info.stats = m->pg_stats;
-      update_snap_collections(log, rm->localt);
+      if (!rm->opt.empty()) {
+	// If the opt is non-empty, we infer we are before
+	// last_backfill (according to the primary, not our
+	// not-quite-accurate value), and should update the
+	// collections now.  Otherwise, we do it later on push.
+	update_snap_collections(log, rm->localt);
+      }
       append_log(log, m->pg_trim_to, rm->localt);
 
       rm->tls.push_back(&rm->localt);
@@ -6231,6 +6256,9 @@ void ReplicatedPG::on_removal()
   dout(10) << "on_removal" << dendl;
   apply_and_flush_repops(false);
   remove_watchers_and_notifies();
+
+  osd->remote_reserver.cancel_reservation(info.pgid);
+  osd->local_reserver.cancel_reservation(info.pgid);
 }
 
 void ReplicatedPG::on_shutdown()
@@ -6956,7 +6984,7 @@ int ReplicatedPG::recover_backfill(int max)
       // Use default priority here, must match sub_op priority
     }
     m->last_backfill = bound;
-    m->stats = pinfo.stats.stats;
+    m->stats = pinfo.stats;
     osd->send_message_osd_cluster(backfill_target, m, get_osdmap()->get_epoch());
   }
 

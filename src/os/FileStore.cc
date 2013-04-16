@@ -2481,7 +2481,7 @@ unsigned FileStore::_do_transaction(Transaction& t, uint64_t op_seq, int trans_n
       {
 	coll_t cid = i.get_cid();
 	if (_check_replay_guard(cid, spos) > 0)
-	  r = _create_collection(cid);
+	  r = _create_collection(cid, spos);
       }
       break;
 
@@ -2591,6 +2591,15 @@ unsigned FileStore::_do_transaction(Transaction& t, uint64_t op_seq, int trans_n
       }
       break;
     case Transaction::OP_SPLIT_COLLECTION:
+      {
+	coll_t cid(i.get_cid());
+	uint32_t bits(i.get_u32());
+	uint32_t rem(i.get_u32());
+	coll_t dest(i.get_cid());
+	r = _split_collection_create(cid, bits, rem, dest, spos);
+      }
+      break;
+    case Transaction::OP_SPLIT_COLLECTION2:
       {
 	coll_t cid(i.get_cid());
 	uint32_t bits(i.get_u32());
@@ -4159,6 +4168,10 @@ int FileStore::_collection_rename(const coll_t &cid, const coll_t &ncid,
   get_cdir(cid, old_coll, sizeof(old_coll));
   get_cdir(ncid, new_coll, sizeof(new_coll));
 
+  if (_check_replay_guard(cid, spos) < 0) {
+    return 0;
+  }
+
   if (_check_replay_guard(ncid, spos) < 0) {
     return _collection_remove_recursive(cid, spos);
   }
@@ -4297,7 +4310,7 @@ bool FileStore::collection_empty(coll_t c)
     assert(!m_filestore_fail_eio || r != -EIO);
     return false;
   }
-  return ls.size() > 0;
+  return ls.empty();
 }
 
 int FileStore::collection_list_range(coll_t c, hobject_t start, hobject_t end,
@@ -4457,6 +4470,30 @@ ObjectMap::ObjectMapIterator FileStore::get_omap_iterator(coll_t c,
   return object_map->get_iterator(hoid);
 }
 
+int FileStore::_create_collection(
+  coll_t c,
+  const SequencerPosition &spos)
+{
+  char fn[PATH_MAX];
+  get_cdir(c, fn, sizeof(fn));
+  dout(15) << "create_collection " << fn << dendl;
+  int r = ::mkdir(fn, 0755);
+  if (r < 0)
+    r = -errno;
+  if (r == -EEXIST && replaying)
+    r = 0;
+  dout(10) << "create_collection " << fn << " = " << r << dendl;
+
+  if (r < 0)
+    return r;
+  r = init_index(c);
+  if (r < 0)
+    return r;
+  _set_replay_guard(c, spos);
+  return 0;
+}
+
+// DEPRECATED -- remove with _split_collection_create
 int FileStore::_create_collection(coll_t c) 
 {
   char fn[PATH_MAX];
@@ -4610,6 +4647,43 @@ int FileStore::_split_collection(coll_t cid,
 				 uint32_t rem,
 				 coll_t dest,
 				 const SequencerPosition &spos)
+{
+  dout(15) << __func__ << " " << cid << " bits: " << bits << dendl;
+  int dstcmp = _check_replay_guard(dest, spos);
+  if (dstcmp < 0)
+    return 0;
+  if (dstcmp > 0 && !collection_empty(dest))
+    return -ENOTEMPTY;
+
+  int srccmp = _check_replay_guard(cid, spos);
+  if (srccmp < 0)
+    return 0;
+
+  _set_replay_guard(cid, spos, true);
+  _set_replay_guard(dest, spos, true);
+
+  Index from;
+  int r = get_index(cid, &from);
+
+  Index to;
+  if (!r)
+    r = get_index(dest, &to);
+
+  if (!r)
+    r = from->split(rem, bits, to);
+
+  _close_replay_guard(cid, spos);
+  _close_replay_guard(dest, spos);
+  return r;
+}
+
+// DEPRECATED: remove once we are sure there won't be any such transactions
+// replayed
+int FileStore::_split_collection_create(coll_t cid,
+					uint32_t bits,
+					uint32_t rem,
+					coll_t dest,
+					const SequencerPosition &spos)
 {
   dout(15) << __func__ << " " << cid << " bits: " << bits << dendl;
   int r = _create_collection(dest);
