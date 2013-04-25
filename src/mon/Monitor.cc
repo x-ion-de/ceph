@@ -2783,7 +2783,6 @@ void Monitor::forward_request_leader(PaxosServiceMessage *req)
     dout(10) << "forward_request " << rr->tid << " request " << *req << dendl;
 
     MForward *forward = new MForward(rr->tid, req, rr->session->caps);
-    forward->set_priority(req->get_priority());
     messenger->send_message(forward, monmap->get_inst(mon));
   } else {
     dout(10) << "forward_request no session for request " << *req << dendl;
@@ -2973,7 +2972,6 @@ void Monitor::resend_routed_requests()
       dout(10) << " resend to mon." << mon << " tid " << rr->tid << " " << *req << dendl;
       MForward *forward = new MForward(rr->tid, req, rr->session->caps);
       forward->client = rr->client_inst;
-      forward->set_priority(req->get_priority());
       messenger->send_message(forward, monmap->get_inst(mon));
     }
   }
