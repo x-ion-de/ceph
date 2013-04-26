@@ -71,7 +71,21 @@ struct RGWObjVersionTracker {
     read_version = write_version;
     write_version = obj_version();
   }
+  void encode(bufferlist& obl) const {
+    ENCODE_START(1, 1, obl);
+    ::encode(read_version, obl);
+    ::encode(write_version, obl);
+    ENCODE_FINISH(obl);
+  }
+  void decode(bufferlist::iterator& bl) {
+    DECODE_START(1, bl);
+    ::decode(read_version, bl);
+    ::decode(write_version, bl);
+    DECODE_FINISH(bl);
+  }
+  RGWObjVersionTracker () : read_version(), write_version() {}
 };
+WRITE_CLASS_ENCODER(RGWObjVersionTracker)
 
 struct RGWUsageBatch {
   map<utime_t, rgw_usage_log_entry> m;

@@ -229,7 +229,9 @@ class XMLArgs
     return (iter != sub_resources.end());
   }
   map<string, string>& get_sub_resources() { return sub_resources; }
-
+  unsigned get_num_params() {
+    return val_map.size();
+  }
   bool has_response_modifier() {
     return has_resp_modifier;
   }
@@ -618,6 +620,7 @@ struct req_state {
    rgw_bucket bucket;
    string bucket_name_str;
    string object_str;
+   string meta_section_str;
    ACLOwner bucket_owner;
    ACLOwner owner;
 

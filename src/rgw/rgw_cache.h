@@ -17,6 +17,7 @@ enum {
 #define CACHE_FLAG_XATTRS         0x2
 #define CACHE_FLAG_META           0x4
 #define CACHE_FLAG_MODIFY_XATTRS  0x8
+#define CACHE_FLAG_VERSION        0x10
 
 #define mydout(v) lsubdout(T::cct, rgw, v)
 
@@ -54,8 +55,9 @@ struct ObjectCacheInfo {
   map<string, bufferlist> xattrs;
   map<string, bufferlist> rm_xattrs;
   ObjectMetaInfo meta;
+  RGWObjVersionTracker version;
 
-  ObjectCacheInfo() : status(0), flags(0), epoch(0) {}
+  ObjectCacheInfo() : status(0), flags(0), epoch(0), version() {}
 
   void encode(bufferlist& bl) const {
     ENCODE_START(4, 3, bl);
@@ -66,6 +68,7 @@ struct ObjectCacheInfo {
     ::encode(meta, bl);
     ::encode(rm_xattrs, bl);
     ::encode(epoch, bl);
+    ::encode(version, bl);
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator& bl) {
@@ -79,6 +82,7 @@ struct ObjectCacheInfo {
       ::decode(rm_xattrs, bl);
     if (struct_v >= 4)
       ::decode(epoch, bl);
+    ::decode(version, bl);
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -247,7 +251,11 @@ int RGWCache<T>::get_obj(void *ctx, RGWObjVersionTracker *objv_tracker, void **h
   string name = normal_name(obj.bucket, oid);
 
   ObjectCacheInfo info;
-  if (cache.get(name, info, CACHE_FLAG_DATA) == 0) {
+  RGWObjVersionTracker tmp_objv_tracker;
+  uint32_t mask = CACHE_FLAG_DATA | CACHE_FLAG_VERSION;
+  if (!objv_tracker)
+    objv_tracker = &tmp_objv_tracker;
+  if (cache.get(name, info, mask) == 0) {
     if (info.status < 0)
       return info.status;
 
@@ -258,6 +266,7 @@ int RGWCache<T>::get_obj(void *ctx, RGWObjVersionTracker *objv_tracker, void **h
     obl.clear();
 
     i.copy_all(obl);
+    *objv_tracker = info.version;
     return bl.length();
   }
   int r = T::get_obj(ctx, objv_tracker, handle, obj, obl, ofs, end);
@@ -280,7 +289,8 @@ int RGWCache<T>::get_obj(void *ctx, RGWObjVersionTracker *objv_tracker, void **h
   bufferlist::iterator o = obl.begin();
   o.copy_all(bl);
   info.status = 0;
-  info.flags = CACHE_FLAG_DATA;
+  info.version = *objv_tracker;
+  info.flags = CACHE_FLAG_DATA | CACHE_FLAG_VERSION;
   cache.put(name, info);
   return r;
 }
@@ -370,6 +380,10 @@ int RGWCache<T>::put_obj_meta_impl(void *ctx, rgw_obj& obj, uint64_t size, time_
       info.data = *data;
       info.flags |= CACHE_FLAG_DATA;
     }
+    if (objv_tracker) {
+      info.version = *objv_tracker;
+      info.flags |= CACHE_FLAG_VERSION;
+    }
   }
   int ret = T::put_obj_meta_impl(ctx, obj, size, mtime, attrs, category, flags, rmattrs, data, manifest, ptag, remove_objs,
                                  modify_version, objv_tracker);
@@ -441,7 +455,10 @@ int RGWCache<T>::obj_stat(void *ctx, rgw_obj& obj, uint64_t *psize, time_t *pmti
   uint64_t epoch;
 
   ObjectCacheInfo info;
-  int r = cache.get(name, info, CACHE_FLAG_META | CACHE_FLAG_XATTRS);
+  RGWObjVersionTracker tmp_objv_tracker;
+  if (!objv_tracker)
+    objv_tracker = &tmp_objv_tracker;
+  int r = cache.get(name, info, CACHE_FLAG_META | CACHE_FLAG_XATTRS | CACHE_FLAG_VERSION);
   if (r == 0) {
     if (info.status < 0)
       return info.status;
@@ -449,6 +466,7 @@ int RGWCache<T>::obj_stat(void *ctx, rgw_obj& obj, uint64_t *psize, time_t *pmti
     size = info.meta.size;
     mtime = info.meta.mtime;
     epoch = info.epoch;
+    *objv_tracker = info.version;
     goto done;
   }
   r = T::obj_stat(ctx, obj, &size, &mtime, &epoch, &info.xattrs, first_chunk, objv_tracker);
@@ -463,7 +481,8 @@ int RGWCache<T>::obj_stat(void *ctx, rgw_obj& obj, uint64_t *psize, time_t *pmti
   info.epoch = epoch;
   info.meta.mtime = mtime;
   info.meta.size = size;
-  info.flags = CACHE_FLAG_META | CACHE_FLAG_XATTRS;
+  info.version = *objv_tracker;
+  info.flags = CACHE_FLAG_META | CACHE_FLAG_XATTRS | CACHE_FLAG_VERSION;
   cache.put(name, info);
 done:
   if (psize)
@@ -512,7 +531,7 @@ int RGWCache<T>::watch_cb(int opcode, uint64_t ver, bufferlist& bl)
   string oid;
   normalize_bucket_and_obj(info.obj.bucket, info.obj.object, bucket, oid);
   string name = normal_name(bucket, oid);
-
+  
   switch (info.op) {
   case UPDATE_OBJ:
     cache.put(name, info.obj_info);

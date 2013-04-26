@@ -84,6 +84,10 @@ void ObjectCache::put(string& name, ObjectCacheInfo& info)
     }
   }
 
+  if (info.flags & CACHE_FLAG_VERSION) {
+    target.version = info.version;
+  }
+
   if (info.flags & CACHE_FLAG_DATA)
     target.data = info.data;
 }
