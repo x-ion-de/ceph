@@ -483,6 +483,7 @@ int main(int argc, const char **argv)
   if (err < 0)
     return 1;
 
+  derr << "pre-close store is " << store.db->db.get() << dendl;
   store.close();
 
   global_init_daemonize(g_ceph_context, 0);
@@ -498,6 +499,7 @@ int main(int argc, const char **argv)
   // reopen leveldb, post-fork!
   ostringstream ss;
   store.open(ss);
+  derr << "reopen store is " << store.db->db.get() << dendl;
 
   messenger->start();
 

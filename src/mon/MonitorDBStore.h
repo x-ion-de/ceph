@@ -29,6 +29,7 @@
 
 class MonitorDBStore
 {
+public:
   boost::scoped_ptr<LevelDBStore> db;
   bool do_dump;
   int dump_fd;

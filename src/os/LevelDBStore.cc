@@ -51,6 +51,7 @@ int LevelDBStore::init(ostream &out, bool create_if_missing)
 
   leveldb::DB *_db;
   leveldb::Status status = leveldb::DB::Open(ldoptions, path, &_db);
+  out << " open with " << _db << std::endl;
   db.reset(_db);
   if (!status.ok()) {
     out << status.ToString() << std::endl;

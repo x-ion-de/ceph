@@ -24,6 +24,7 @@
  * Uses LevelDB to implement the KeyValueDB interface
  */
 class LevelDBStore : public KeyValueDB {
+public:
   string path;
   boost::scoped_ptr<leveldb::DB> db;
   boost::scoped_ptr<leveldb::Cache> db_cache;
