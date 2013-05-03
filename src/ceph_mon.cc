@@ -295,7 +295,7 @@ int main(int argc, const char **argv)
 
   if (compact || g_conf->mon_compact_on_start) {
     derr << "compacting monitor store ..." << dendl;
-    mon->store->compact();
+    store.compact();
     derr << "done compacting" << dendl;
   }
 
