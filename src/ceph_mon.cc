@@ -483,6 +483,8 @@ int main(int argc, const char **argv)
   if (err < 0)
     return 1;
 
+  store.close();
+
   global_init_daemonize(g_ceph_context, 0);
   common_init_finish(g_ceph_context);
   global_init_chdir(g_ceph_context);
@@ -493,6 +495,9 @@ int main(int argc, const char **argv)
   register_async_signal_handler_oneshot(SIGINT, handle_mon_signal);
   register_async_signal_handler_oneshot(SIGTERM, handle_mon_signal);
 
+  // reopen leveldb, post-fork!
+  ostringstream ss;
+  store.open(ss);
 
   messenger->start();
 

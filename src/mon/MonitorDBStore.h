@@ -488,6 +488,10 @@ class MonitorDBStore
     return db->create_and_open(out);
   }
 
+  void close() {
+    return db->close();
+  }
+
   void compact() {
     db->compact();
   }

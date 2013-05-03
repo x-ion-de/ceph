@@ -108,6 +108,12 @@ public:
     return init(out, true);
   }
 
+  /// Closes the DB.
+  void close() {
+    db.reset(NULL);
+  }
+
+
   class LevelDBTransactionImpl : public KeyValueDB::TransactionImpl {
   public:
     leveldb::WriteBatch bat;
