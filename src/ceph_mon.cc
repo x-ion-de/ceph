@@ -484,7 +484,9 @@ int main(int argc, const char **argv)
     return 1;
 
   derr << "pre-close store is " << store.db->db.get() << dendl;
+  boost::scoped_ptr<leveldb::DB> db(store.db->db.get());
   store.close();
+  derr << "post-close store is " << store.db->db.get() << dendl;
 
   global_init_daemonize(g_ceph_context, 0);
   common_init_finish(g_ceph_context);
@@ -498,8 +500,13 @@ int main(int argc, const char **argv)
 
   // reopen leveldb, post-fork!
   ostringstream ss;
+  derr << "pre-reopen store is " << store.db->db.get() << dendl;
   store.open(ss);
   derr << "reopen store is " << store.db->db.get() << dendl;
+
+  store.compact();
+  
+  derr << "compacted" << dendl;
 
   messenger->start();
 

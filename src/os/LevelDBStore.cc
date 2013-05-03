@@ -7,6 +7,8 @@
 #include <string>
 #include <tr1/memory>
 #include <errno.h>
+
+#include "include/stringify.h"
 using std::string;
 
 int LevelDBStore::init(ostream &out, bool create_if_missing)
@@ -46,12 +48,15 @@ int LevelDBStore::init(ostream &out, bool create_if_missing)
 
   if (options.log_file.length()) {
     leveldb::Env *env = leveldb::Env::Default();
-    env->NewLogger(options.log_file, &ldoptions.info_log);
+    static int foo = 1;
+    string log = options.log_file;
+    log += stringify(foo++);
+    env->NewLogger(log, &ldoptions.info_log);
   }
 
   leveldb::DB *_db;
   leveldb::Status status = leveldb::DB::Open(ldoptions, path, &_db);
-  out << " open with " << _db << std::endl;
+  out << this << " open with " << _db << std::endl;
   db.reset(_db);
   if (!status.ok()) {
     out << status.ToString() << std::endl;
