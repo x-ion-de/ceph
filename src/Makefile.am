@@ -1668,6 +1668,26 @@ libos_a_SOURCES = \
 libos_a_CXXFLAGS= ${AM_CXXFLAGS}
 noinst_LIBRARIES += libos.a
 
+liboss_la_SOURCES = \
+	os/FileJournal.cc \
+	os/FileStore.cc \
+	os/chain_xattr.cc \
+	os/ObjectStore.cc \
+	os/JournalingObjectStore.cc \
+	os/LFNIndex.cc \
+	os/HashIndex.cc \
+	os/IndexManager.cc \
+	os/FlatIndex.cc \
+	os/DBObjectMap.cc \
+	os/LevelDBStore.cc \
+	os/WBThrottle.cc
+liboss_la_CXXFLAGS= ${AM_CXXFLAGS}
+liboss_la_LDFLAGS = ${AM_LDFLAGS} -version-info 1:0:0 \
+liboss_la_LDFLAGS = ${AM_LDFLAGS} $(PTHREAD_LIBS) $(EXTRALIBS) 
+lib_LTLIBRARIES += liboss.la
+
+
+
 libosd_a_SOURCES = \
 	osd/PG.cc \
 	osd/PGLog.cc \
