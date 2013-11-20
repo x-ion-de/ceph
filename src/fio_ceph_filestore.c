@@ -16,8 +16,11 @@
 
 #include <iostream>
 #include "os/FileStore.h"
+#include "global/global_init.h"
 
+#include "../../fio/fio.h"
 
+#if 0
 struct thread_data;
 struct io_u;
 struct fio_file;
@@ -60,6 +63,52 @@ struct ioengine_ops {
 	void *data;
 	void *dlhandle;
 };
+#endif
+
+
+////////////////////////////
+
+struct rbd_data {
+        struct io_u **aio_events;
+        unsigned int queued;
+        uint32_t events;
+};
+
+
+/////////////////////////////
+
+
+void set_start(off_t off, utime_t t)
+{
+}
+
+void set_ack(off_t off, utime_t t)
+{
+}
+
+void set_commit(off_t off, utime_t t)
+{
+}
+
+
+
+struct C_Ack : public Context {
+  off_t off;
+  C_Ack(off_t o) : off(o) {}
+  void finish(int r) {
+    set_ack(off, ceph_clock_now(g_ceph_context));
+  }
+};
+struct C_Commit : public Context {
+  off_t off;
+  C_Commit(off_t o) : off(o) {}
+  void finish(int r) {
+    set_commit(off, ceph_clock_now(g_ceph_context));
+  }
+};
+
+
+
 
 /*
  * The core of the module is identical to the ones included with fio,
@@ -117,6 +166,22 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 	 * if we could queue no more at this point (you'd have to
 	 * define ->commit() to handle that.
 	 */
+
+
+	ObjectStore *fs = NULL; // FIXME - get from rbd_data
+
+	uint64_t len = io_u->xfer_buflen;
+	uint64_t off = io_u->offset;
+        bufferlist data;
+	data.append((char *)io_u->xfer_buf, io_u->xfer_buflen);
+	
+	ObjectStore::Transaction *t = new ObjectStore::Transaction;
+
+	sobject_t poid(object_t("streamtest"), 0);
+	t->write(coll_t(), hobject_t(poid), off, len, data);
+
+	fs->queue_transaction(NULL, t, new C_Ack(off), new C_Commit(off));
+
 	return FIO_Q_COMPLETED;
 }
 
@@ -137,6 +202,17 @@ static int fio_ceph_filestore_prep(struct thread_data *td, struct io_u *io_u)
  */
 static int fio_ceph_filestore_init(struct thread_data *td)
 {
+        struct rbd_data *rbd_data;
+
+        rbd_data = (struct rbd_data *) malloc(sizeof(struct rbd_data));
+        memset(rbd_data, 0, sizeof(struct rbd_data));
+        rbd_data->aio_events = (struct io_u**)  malloc(td->o.iodepth * sizeof(struct io_u *));
+        memset(rbd_data->aio_events, 0, td->o.iodepth * sizeof(struct io_u *));
+        td->io_ops->data = rbd_data;
+
+	common_init_finish(g_ceph_context);
+
+
   	ObjectStore *fs = new FileStore("peng", "jpeng");
 
 	if (fs->mkfs() < 0) {
@@ -212,5 +288,4 @@ void get_ioengine(struct ioengine_ops **ioengine_ptr) {
 	ioengine->close_file     = fio_ceph_filestore_close;
 }
 }
-
 
