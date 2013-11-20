@@ -77,6 +77,8 @@ struct rbd_data {
         struct io_u **aio_events;
         unsigned int queued;
         uint32_t events;
+	char *osd_path;
+	char *journal_path;
 	ObjectStore *fs;
 #ifdef AIO_EVENT_LOCKING
         pthread_mutex_t aio_event_lock;
@@ -104,7 +106,8 @@ struct C_Commit : public Context {
 #ifdef AIO_EVENT_LOCKING
         pthread_mutex_lock(&(rbd_data->aio_event_lock));
 #endif
-        dprint(FD_IO, "%s:  aio_events[%d] = %p\n", __func__, rbd_data->events, io_u);
+        dprint(FD_IO, "%s:  aio_events[%d] = %p r:%d\n", __func__, rbd_data->events, io_u, r);
+	//cout << "aio_events(" << io_u << "): " << r << std::endl;
         rbd_data->aio_events[rbd_data->events] = io_u;
         rbd_data->events++;
 
@@ -244,6 +247,7 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
         io_u->engine_data = rbd_data;
         if (io_u->ddir == DDIR_WRITE) {
 		t->write(coll_t(), hobject_t(poid), off, len, data);
+		//cout << "QUEUING transaction " << io_u << std::endl;
 		fs->queue_transaction(NULL, t, new C_Ack(io_u), new C_Commit(io_u));
 	} else {
 		cout << "WARNING: No DDIR beside DDIR_WRITE supported!" << std::endl;
@@ -299,7 +303,13 @@ static int fio_ceph_filestore_init(struct thread_data *td)
 #endif  
 
 
-  	ObjectStore *fs = new FileStore("peng", "/var/lib/ceph/osd/journal-ram/peng");
+	rbd_data->osd_path = strdup("fio_ceph_filestore.XXXXXXX");
+	rbd_data->journal_path = strdup("/var/lib/ceph/osd/journal-ram/fio_ceph_filestore.XXXXXXX");
+
+	mkdtemp(rbd_data->osd_path);
+	//mktemp(rbd_data->journal_path); // NOSPC issue
+
+  	ObjectStore *fs = new FileStore(rbd_data->osd_path, rbd_data->journal_path);
 	rbd_data->fs = fs;
 
 	if (fs->mkfs() < 0) {
@@ -327,6 +337,11 @@ static int fio_ceph_filestore_init(struct thread_data *td)
  */
 static void fio_ceph_filestore_cleanup(struct thread_data *td)
 {
+        struct rbd_data *rbd_data = (struct rbd_data*) td->io_ops->data;
+	
+	/* TODO: cleanup test jorunal/osd path */
+	free(rbd_data->osd_path);
+	free(rbd_data->journal_path);
 }
 
 /*
