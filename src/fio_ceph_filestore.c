@@ -18,6 +18,11 @@
 #include "os/FileStore.h"
 #include "global/global_init.h"
 
+#define AIO_EVENT_LOCKING 
+#ifdef AIO_EVENT_LOCKING
+#include <pthread.h>
+#endif
+
 #include "../../fio/fio.h"
 
 #if 0
@@ -73,38 +78,42 @@ struct rbd_data {
         unsigned int queued;
         uint32_t events;
 	ObjectStore *fs;
+#ifdef AIO_EVENT_LOCKING
+        pthread_mutex_t aio_event_lock;
+        pthread_cond_t aio_event_cond;
+#endif
+
 };
 
 
 /////////////////////////////
 
 
-void set_start(off_t off, utime_t t)
-{
-}
-
-void set_ack(off_t off, utime_t t)
-{
-}
-
-void set_commit(off_t off, utime_t t)
-{
-}
-
-
-
 struct C_Ack : public Context {
-  off_t off;
-  C_Ack(off_t o) : off(o) {}
+  struct io_u *io_u;
+  C_Ack(struct io_u* io_u) : io_u(io_u) {}
   void finish(int r) {
-    set_ack(off, ceph_clock_now(g_ceph_context));
   }
 };
 struct C_Commit : public Context {
-  off_t off;
-  C_Commit(off_t o) : off(o) {}
+  struct io_u *io_u;
+  C_Commit(struct io_u* io_u) : io_u(io_u) {}
   void finish(int r) {
-    set_commit(off, ceph_clock_now(g_ceph_context));
+    struct rbd_data *rbd_data = (struct rbd_data *) io_u->engine_data;
+
+#ifdef AIO_EVENT_LOCKING
+        pthread_mutex_lock(&(rbd_data->aio_event_lock));
+#endif
+        dprint(FD_IO, "%s:  aio_events[%d] = %p\n", __func__, rbd_data->events, io_u);
+        rbd_data->aio_events[rbd_data->events] = io_u;
+        rbd_data->events++;
+
+#ifdef AIO_EVENT_LOCKING
+        pthread_cond_signal(&(rbd_data->aio_event_cond));
+        pthread_mutex_unlock(&(rbd_data->aio_event_lock));
+#endif
+
+ 
   }
 };
 
@@ -125,7 +134,10 @@ struct C_Commit : public Context {
  */
 static struct io_u *fio_ceph_filestore_event(struct thread_data *td, int event)
 {
-	return NULL;
+        struct rbd_data *rbd_data = (struct rbd_data*) td->io_ops->data;
+        dprint(FD_IO, "%s: event:%d\n", __func__, event);
+        
+        return rbd_data->aio_events[event];
 }
 
 /*
@@ -137,7 +149,34 @@ static struct io_u *fio_ceph_filestore_event(struct thread_data *td, int event)
 static int fio_ceph_filestore_getevents(struct thread_data *td, unsigned int min,
 				  unsigned int max, struct timespec *t)
 {
-	return 0;
+        struct rbd_data *rbd_data = (struct rbd_data*) td->io_ops->data;
+        int events = 0;
+
+        dprint(FD_IO, "%s\n", __func__);
+
+#ifdef AIO_EVENT_LOCKING
+        pthread_mutex_lock(&(rbd_data->aio_event_lock));
+#endif
+
+        while (rbd_data->events < min) {
+#ifdef AIO_EVENT_LOCKING
+                pthread_cond_wait(&(rbd_data->aio_event_cond), &(rbd_data->aio_event_lock));
+#else
+                usleep(10000);
+#endif
+        }
+
+
+
+        events = rbd_data->events;
+        rbd_data->events -= events;
+
+#ifdef AIO_EVENT_LOCKING
+        pthread_mutex_unlock(&(rbd_data->aio_event_lock));
+#endif
+
+
+	return events;
 }
 
 /*
@@ -170,6 +209,7 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 
 
 	struct rbd_data *rbd_data = (struct rbd_data *) td->io_ops->data;
+	sobject_t poid(object_t("streamtest"), 0);
 	ObjectStore *fs = rbd_data->fs;
 
 #if 0
@@ -190,18 +230,36 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 
 
 	ObjectStore::Transaction *t = new ObjectStore::Transaction;
+	if (!t) {
 
-	sobject_t poid(object_t("streamtest"), 0);
+		cout << "ObjectStore Transcation allocation failed." << std::endl;
+		goto failed;
+	}
+
 
 #if 0
 	t->write(coll_t(), hobject_t(poid), pos, bytes, bl);
 	fs->queue_transaction(NULL, t, new C_Ack(pos), new C_Commit(pos));
 #else
-	t->write(coll_t(), hobject_t(poid), off, len, data);
-	fs->queue_transaction(NULL, t, new C_Ack(off), new C_Commit(off));
+        io_u->engine_data = rbd_data;
+        if (io_u->ddir == DDIR_WRITE) {
+		t->write(coll_t(), hobject_t(poid), off, len, data);
+		fs->queue_transaction(NULL, t, new C_Ack(io_u), new C_Commit(io_u));
+	} else {
+		cout << "WARNING: No DDIR beside DDIR_WRITE supported!" << std::endl;
+		return FIO_Q_COMPLETED;
+	}
+
 #endif
 
-	return FIO_Q_COMPLETED;
+        rbd_data->queued++;
+        return FIO_Q_QUEUED;
+
+failed:
+
+        io_u->error = -1;
+        td_verror(td, io_u->error, "xfer");
+        return FIO_Q_COMPLETED;
 }
 
 /*
@@ -234,6 +292,11 @@ static int fio_ceph_filestore_init(struct thread_data *td)
 	global_init(NULL, args, CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_UTILITY, 0);
 	//g_conf->journal_dio = false;
 	common_init_finish(g_ceph_context);
+
+#ifdef AIO_EVENT_LOCKING
+        pthread_mutex_init(&(rbd_data->aio_event_lock), NULL);
+        pthread_cond_init(&(rbd_data->aio_event_cond), NULL);
+#endif  
 
 
   	ObjectStore *fs = new FileStore("peng", "/var/lib/ceph/osd/journal-ram/peng");
