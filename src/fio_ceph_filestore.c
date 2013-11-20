@@ -212,7 +212,11 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 
 
 	struct rbd_data *rbd_data = (struct rbd_data *) td->io_ops->data;
-	sobject_t poid(object_t("streamtest"), 0);
+
+        char buf[32];
+        snprintf(buf, sizeof(buf), "XXX_%lu_%lu", io_u->start_time.tv_usec, io_u->start_time.tv_sec);
+        sobject_t poid(object_t(buf), 0);
+
 	ObjectStore *fs = rbd_data->fs;
 
 #if 0
