@@ -91,15 +91,16 @@ struct rbd_data {
 /////////////////////////////
 
 
-struct C_Ack : public Context {
+struct OnCommitted : public Context {
   struct io_u *io_u;
-  C_Ack(struct io_u* io_u) : io_u(io_u) {}
+  OnCommitted(struct io_u* io_u) : io_u(io_u) {}
   void finish(int r) {
   }
 };
-struct C_Commit : public Context {
+struct OnApplied : public Context {
   struct io_u *io_u;
-  C_Commit(struct io_u* io_u) : io_u(io_u) {}
+  ObjectStore::Transaction *t;
+  OnApplied(struct io_u* io_u, ObjectStore::Transaction *t) : io_u(io_u), t(t) {}
   void finish(int r) {
     struct rbd_data *rbd_data = (struct rbd_data *) io_u->engine_data;
 
@@ -116,7 +117,7 @@ struct C_Commit : public Context {
         pthread_mutex_unlock(&(rbd_data->aio_event_lock));
 #endif
 
- 
+	delete t;
   }
 };
 
@@ -212,11 +213,9 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 
 
 	struct rbd_data *rbd_data = (struct rbd_data *) td->io_ops->data;
-
-        char buf[32];
-        snprintf(buf, sizeof(buf), "XXX_%lu_%lu", io_u->start_time.tv_usec, io_u->start_time.tv_sec);
-        sobject_t poid(object_t(buf), 0);
-
+	char buf[32];
+	snprintf(buf, sizeof(buf), "XXX_%lu_%lu", io_u->start_time.tv_usec, io_u->start_time.tv_sec);
+	sobject_t poid(object_t(buf), 0);
 	ObjectStore *fs = rbd_data->fs;
 
 #if 0
@@ -246,13 +245,13 @@ static int fio_ceph_filestore_queue(struct thread_data *td, struct io_u *io_u)
 
 #if 0
 	t->write(coll_t(), hobject_t(poid), pos, bytes, bl);
-	fs->queue_transaction(NULL, t, new C_Ack(pos), new C_Commit(pos));
+	fs->queue_transaction(NULL, t, new OnApplied(pos), new OnCommitted(pos));
 #else
         io_u->engine_data = rbd_data;
         if (io_u->ddir == DDIR_WRITE) {
 		t->write(coll_t(), hobject_t(poid), off, len, data);
 		//cout << "QUEUING transaction " << io_u << std::endl;
-		fs->queue_transaction(NULL, t, new C_Ack(io_u), new C_Commit(io_u));
+		fs->queue_transaction(NULL, t, new OnApplied(io_u, t), new OnCommitted(io_u));
 	} else {
 		cout << "WARNING: No DDIR beside DDIR_WRITE supported!" << std::endl;
 		return FIO_Q_COMPLETED;
@@ -300,6 +299,10 @@ static int fio_ceph_filestore_init(struct thread_data *td)
 	global_init(NULL, args, CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_UTILITY, 0);
 	//g_conf->journal_dio = false;
 	common_init_finish(g_ceph_context);
+	//g_ceph_context->_conf->set_val("debug_filestore", "20");
+	//g_ceph_context->_conf->set_val("debug_throttle", "20");
+	g_ceph_context->_conf->apply_changes(NULL);
+
 
 #ifdef AIO_EVENT_LOCKING
         pthread_mutex_init(&(rbd_data->aio_event_lock), NULL);
@@ -307,7 +310,7 @@ static int fio_ceph_filestore_init(struct thread_data *td)
 #endif  
 
 
-	rbd_data->osd_path = strdup("fio_ceph_filestore.XXXXXXX");
+	rbd_data->osd_path = strdup("/mnt/fio_ceph_filestore.XXXXXXX");
 	rbd_data->journal_path = strdup("/var/lib/ceph/osd/journal-ram/fio_ceph_filestore.XXXXXXX");
 
 	mkdtemp(rbd_data->osd_path);
