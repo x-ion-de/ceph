@@ -94,3 +94,15 @@ int RGWCivetWebFrontend::run()
 
   return ! ctx ? -EIO : 0;
 } /* RGWCivetWebFrontend::run */
+
+void RGWCivetWebFrontend::stop()
+{
+  if (ctx) {
+    char stats[1000];
+    if (mg_get_context_info(ctx, stats, sizeof(stats))) {
+      dout(15) << stats << dendl;
+    }
+    mg_stop(ctx);
+  }
+}
+

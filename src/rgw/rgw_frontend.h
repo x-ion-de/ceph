@@ -121,11 +121,7 @@ public:
 
   int process(struct mg_connection* conn);
 
-  void stop() override {
-    if (ctx) {
-      mg_stop(ctx);
-    }
-  }
+  void stop() override;
 
   void join() override {
     return;
